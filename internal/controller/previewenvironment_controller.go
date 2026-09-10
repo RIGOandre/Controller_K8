@@ -315,6 +315,23 @@ func (r *PreviewEnvironmentReconciler) finalize(ctx context.Context, pe *preview
 		return ctrl.Result{}, err
 	}
 	if !gone {
+		// Enquanto o namespace não sai, o status precisa dizer isso. Sem esta
+		// parte, um namespace preso em Terminating deixava o ambiente
+		// aparecendo como Provisioning e com a URL publicada — quem olhasse
+		// `kubectl get previews` veria um ambiente que parece estar subindo e
+		// um endereço que não responde mais.
+		r.transition(pe, previewv1alpha1.PhaseTerminating)
+		pe.Status.URL = ""
+		pe.Status.ReadyReplicas = 0
+		r.setReady(pe, metav1.ConditionFalse, "EmRemocao",
+			fmt.Sprintf("aguardando o namespace %s sair de Terminating", pe.NamespaceName()))
+		r.setProgressing(pe, metav1.ConditionTrue, "EmRemocao", "removendo o ambiente")
+		if err := r.publishStatus(ctx, pe); err != nil {
+			// Status é diagnóstico: não vale travar a remoção por causa dele.
+			// Um conflito aqui é comum — o objeto está sendo apagado.
+			log.FromContext(ctx).V(1).Info("não consegui publicar o status durante a remoção", "erro", err)
+		}
+
 		// Soltar o finalizer aqui deixaria o namespace terminando sem dono.
 		// Se ele travasse em Terminating, ninguém mais saberia de onde veio.
 		return ctrl.Result{RequeueAfter: terminatingRequeue}, nil
@@ -378,7 +395,7 @@ func (r *PreviewEnvironmentReconciler) transition(pe *previewv1alpha1.PreviewEnv
 		return
 	}
 	pe.Status.Phase = phase
-	transitions.WithLabelValues(string(phase)).Inc()
+	transitions.WithLabelValues(string(phase), pe.Spec.Repository).Inc()
 	r.event(pe, corev1.EventTypeNormal, string(phase), fmt.Sprintf("ambiente em %s", phase))
 }
 
@@ -426,7 +443,12 @@ func (r *PreviewEnvironmentReconciler) refreshActiveGauge(ctx context.Context) {
 		log.FromContext(ctx).Error(err, "não foi possível recontar os ambientes ativos")
 		return
 	}
-	activeEnvironments.Set(float64(len(list.Items)))
+
+	porRepositorio := map[string]int{}
+	for i := range list.Items {
+		porRepositorio[list.Items[i].Spec.Repository]++
+	}
+	publicarAtivos(porRepositorio)
 }
 
 func (r *PreviewEnvironmentReconciler) now() time.Time {

@@ -26,8 +26,8 @@ func TestContratoDasMetricas(t *testing.T) {
 	}
 
 	querido := map[string][]string{
-		"preview_environments_active":                    {},
-		"preview_environment_transitions_total":          {"phase"},
+		"preview_environments_active":                    {"repository"},
+		"preview_environment_transitions_total":          {"phase", "repository"},
 		"preview_environment_reconcile_duration_seconds": {"result"},
 		"preview_environment_expires_at_seconds":         {"name", "namespace", "pull_request", "repository"},
 	}

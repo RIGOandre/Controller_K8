@@ -396,6 +396,7 @@ spec:
                 - Provisioning
                 - Ready
                 - Expired
+                - Terminating
                 - Failed
                 type: string
               readyReplicas:

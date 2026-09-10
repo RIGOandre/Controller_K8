@@ -55,6 +55,18 @@ func TestFinalizerSeguraOCRAteONamespaceSumir(t *testing.T) {
 		t.Fatal("o namespace não foi marcado para remoção")
 	}
 
+	// Enquanto a remoção não termina, o status precisa dizer isso. Antes desta
+	// asserção o ambiente ficava em Provisioning com a URL publicada, e quem
+	// olhasse `kubectl get previews` via um ambiente que parece estar subindo e
+	// um endereço que não responde mais.
+	durante := s.lerAmbiente(t, pe)
+	if durante.Status.Phase != previewv1alpha1.PhaseTerminating {
+		t.Fatalf("queria Terminating durante a remoção, veio %q", durante.Status.Phase)
+	}
+	if durante.Status.URL != "" {
+		t.Fatalf("a URL continuou publicada durante a remoção: %q", durante.Status.URL)
+	}
+
 	// Quem quer que segurasse o namespace terminou.
 	ns.Finalizers = nil
 	if err := s.c.Update(ctx, &ns); err != nil {

@@ -1,6 +1,8 @@
 package controller
 
 import (
+	"sync"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
@@ -13,15 +15,19 @@ import (
 // ambiente vence. A última é a que permite alertar antes do preview sumir
 // debaixo de quem está revisando o PR.
 var (
-	activeEnvironments = prometheus.NewGauge(prometheus.GaugeOpts{
+	// Quebrado por repositório e não um total só: num cluster que atende mais
+	// de um projeto, "sete ambientes no ar" não diz de quem eles são nem qual
+	// repositório está segurando a quota. A cardinalidade é o número de
+	// repositórios, que é pequeno e não cresce com o tempo.
+	activeEnvironments = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "preview_environments_active",
-		Help: "Ambientes de preview existentes no cluster.",
-	})
+		Help: "Ambientes de preview existentes no cluster, por repositório.",
+	}, []string{"repository"})
 
 	transitions = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "preview_environment_transitions_total",
-		Help: "Transições de fase, contadas por fase de destino.",
-	}, []string{"phase"})
+		Help: "Transições de fase, contadas por fase de destino e repositório.",
+	}, []string{"phase", "repository"})
 
 	reconcileDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "preview_environment_reconcile_duration_seconds",
@@ -47,6 +53,25 @@ const (
 	resultadoOK   = "success"
 	resultadoErro = "error"
 )
+
+// travaAtivos serializa o par Reset+Set do gauge de ativos. Com mais de um
+// reconcile simultâneo, dois recontagens interleavadas deixariam a série num
+// estado que nunca existiu — a segunda apagaria o que a primeira acabou de
+// escrever, no meio da escrita.
+var travaAtivos sync.Mutex
+
+// publicarAtivos troca o conjunto inteiro de séries de uma vez. O Reset é o
+// que faz um repositório sem nenhum ambiente sumir do gráfico, em vez de
+// congelar no último valor para sempre.
+func publicarAtivos(porRepositorio map[string]int) {
+	travaAtivos.Lock()
+	defer travaAtivos.Unlock()
+
+	activeEnvironments.Reset()
+	for repositorio, total := range porRepositorio {
+		activeEnvironments.WithLabelValues(repositorio).Set(float64(total))
+	}
+}
 
 func init() {
 	metrics.Registry.MustRegister(activeEnvironments, transitions, reconcileDuration, expiryTimestamp)

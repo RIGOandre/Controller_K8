@@ -7,7 +7,7 @@ import (
 
 // Phase é o resumo de uma linha do estado do ambiente. Quem precisa de
 // detalhe lê as conditions; a phase existe para o `kubectl get` caber na tela.
-// +kubebuilder:validation:Enum=Pending;Provisioning;Ready;Expired;Failed
+// +kubebuilder:validation:Enum=Pending;Provisioning;Ready;Expired;Terminating;Failed
 type Phase string
 
 const (
@@ -19,6 +19,8 @@ const (
 	PhaseReady Phase = "Ready"
 	// PhaseExpired indica que o TTL venceu e o ambiente foi derrubado.
 	PhaseExpired Phase = "Expired"
+	// PhaseTerminating indica remoção pedida e ainda não concluída.
+	PhaseTerminating Phase = "Terminating"
 	// PhaseFailed indica erro que não se resolve em nova tentativa sozinho.
 	PhaseFailed Phase = "Failed"
 )
