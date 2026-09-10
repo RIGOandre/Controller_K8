@@ -10,7 +10,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
-	previewv1alpha1 "github.com/RIGOandre/Controller_K8/api/v1alpha1"
+	previewv1alpha1 "github.com/RIGOandre/preview-operator/api/v1alpha1"
 )
 
 // Nomes fixos dentro do namespace do preview. O namespace é exclusivo do

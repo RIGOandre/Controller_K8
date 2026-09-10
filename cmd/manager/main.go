@@ -16,8 +16,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	previewv1alpha1 "github.com/RIGOandre/Controller_K8/api/v1alpha1"
-	"github.com/RIGOandre/Controller_K8/internal/controller"
+	previewv1alpha1 "github.com/RIGOandre/preview-operator/api/v1alpha1"
+	"github.com/RIGOandre/preview-operator/internal/controller"
 )
 
 var scheme = runtime.NewScheme()

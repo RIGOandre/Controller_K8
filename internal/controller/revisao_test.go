@@ -16,7 +16,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
-	previewv1alpha1 "github.com/RIGOandre/Controller_K8/api/v1alpha1"
+	previewv1alpha1 "github.com/RIGOandre/preview-operator/api/v1alpha1"
 )
 
 // Este arquivo guarda um teste por achado da revisão adversarial. Cada um

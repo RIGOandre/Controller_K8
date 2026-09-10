@@ -24,7 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	previewv1alpha1 "github.com/RIGOandre/Controller_K8/api/v1alpha1"
+	previewv1alpha1 "github.com/RIGOandre/preview-operator/api/v1alpha1"
 )
 
 // Os testes com client falso cobrem a decisão do reconcile. O que eles não

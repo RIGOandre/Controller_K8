@@ -1,4 +1,4 @@
-module github.com/RIGOandre/Controller_K8
+module github.com/RIGOandre/preview-operator
 
 go 1.24
 

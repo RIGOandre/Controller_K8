@@ -55,7 +55,7 @@ próxima passada.
 **1. Instale o operator** (CRD, RBAC e manager):
 
 ```bash
-make deploy IMG=ghcr.io/rigoandre/controller_k8:v0.1.0
+make deploy IMG=ghcr.io/rigoandre/preview-operator:v0.1.0
 ```
 
 **2. Copie o workflow** de [`examples/github-actions/preview.yml`](examples/github-actions/preview.yml)
@@ -168,8 +168,8 @@ dentro, consumindo quota sem nenhum objeto que aponte para ele.
 
 ```
 $ go test ./... -race -cover
-ok  github.com/RIGOandre/Controller_K8/api/v1alpha1        coverage: 37.3%
-ok  github.com/RIGOandre/Controller_K8/internal/controller  coverage: 88.4%
+ok  github.com/RIGOandre/preview-operator/api/v1alpha1        coverage: 37.3%
+ok  github.com/RIGOandre/preview-operator/internal/controller  coverage: 88.4%
 ```
 
 60 casos, em duas camadas. Os 37% do pacote da API são cobertura diluída pelo
