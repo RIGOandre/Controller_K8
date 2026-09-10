@@ -20,7 +20,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	previewv1alpha1 "github.com/RIGOandre/preview-operator/api/v1alpha1"
+	previewv1alpha1 "github.com/RIGOandre/Controller_K8/api/v1alpha1"
 )
 
 // terminatingRequeue é o intervalo de espera enquanto um namespace ainda

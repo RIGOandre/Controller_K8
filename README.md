@@ -55,7 +55,7 @@ próxima passada.
 **1. Instale o operator** (CRD, RBAC e manager):
 
 ```bash
-make deploy IMG=ghcr.io/rigoandre/preview-operator:v0.1.0
+make deploy IMG=ghcr.io/rigoandre/controller_k8:v0.1.0
 ```
 
 **2. Copie o workflow** de [`examples/github-actions/preview.yml`](examples/github-actions/preview.yml)

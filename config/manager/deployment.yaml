@@ -22,7 +22,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: manager
-          image: ghcr.io/rigoandre/preview-operator:v0.1.0
+          image: ghcr.io/rigoandre/controller_k8:v0.1.0
           args:
             - --leader-elect
             - --base-domain=preview.exemplo.dev

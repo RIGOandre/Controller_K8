@@ -10,7 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	previewv1alpha1 "github.com/RIGOandre/preview-operator/api/v1alpha1"
+	previewv1alpha1 "github.com/RIGOandre/Controller_K8/api/v1alpha1"
 )
 
 // Soltar o finalizer assim que o Delete do namespace volta deixaria um

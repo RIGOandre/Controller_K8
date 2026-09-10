@@ -1,4 +1,4 @@
-IMG ?= ghcr.io/rigoandre/preview-operator:dev
+IMG ?= ghcr.io/rigoandre/controller_k8:dev
 CONTROLLER_GEN ?= go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.16.5
 
 .PHONY: help

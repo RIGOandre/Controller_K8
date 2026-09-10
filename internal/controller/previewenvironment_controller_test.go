@@ -20,7 +20,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	previewv1alpha1 "github.com/RIGOandre/preview-operator/api/v1alpha1"
+	previewv1alpha1 "github.com/RIGOandre/Controller_K8/api/v1alpha1"
 )
 
 var criacao = time.Date(2026, 3, 1, 9, 0, 0, 0, time.UTC)
