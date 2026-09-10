@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -56,9 +57,9 @@ type PreviewEnvironmentReconciler struct {
 func (r *PreviewEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
 	started := r.now()
 	defer func() {
-		outcome := "ok"
+		outcome := resultadoOK
 		if err != nil {
-			outcome = "erro"
+			outcome = resultadoErro
 		}
 		reconcileDuration.WithLabelValues(outcome).Observe(r.now().Sub(started).Seconds())
 	}()
@@ -87,11 +88,16 @@ func (r *PreviewEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 
 	expiry := pe.ExpiryTime()
-	expiryTimestamp.WithLabelValues(pe.Namespace, pe.Name).Set(float64(expiry.Unix()))
-
 	if !r.now().Before(expiry) {
 		return r.expire(ctx, &pe)
 	}
+
+	// A série do vencimento só existe enquanto o ambiente existe. Publicá-la
+	// antes da checagem acima faria um ambiente já vencido recriar a própria
+	// série a cada evento, logo depois de a derrubada tê-la removido.
+	expiryTimestamp.WithLabelValues(
+		pe.Namespace, pe.Name, pe.Spec.Repository, strconv.FormatInt(int64(pe.Spec.PullRequest), 10),
+	).Set(float64(expiry.Unix()))
 
 	if err := r.apply(ctx, &pe); err != nil {
 		r.setProgressing(&pe, metav1.ConditionTrue, "ErroAoAplicar", err.Error())

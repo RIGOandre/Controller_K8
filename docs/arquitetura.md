@@ -101,8 +101,8 @@ Quatro séries, em `/metrics`, no registry do controller-runtime:
 |---|---|
 | `preview_environments_active` | Quantos ambientes existem agora |
 | `preview_environment_transitions_total{phase}` | Quantos subiram, venceram, falharam |
-| `preview_environment_reconcile_duration_seconds{result}` | Se o laço está lento |
-| `preview_environment_expires_at_seconds{namespace,name}` | Alertar antes de o preview sumir debaixo de quem revisa |
+| `preview_environment_reconcile_duration_seconds{result="success"\|"error"}` | Se o laço está lento, e quanto dele falha |
+| `preview_environment_expires_at_seconds{namespace,name,repository,pull_request}` | Alertar antes de o preview sumir debaixo de quem revisa |
 
 A última sai da série quando o ambiente cai. Sem isso o Prometheus continuaria
 mostrando o vencimento de um preview apagado meses antes, e todo alerta em

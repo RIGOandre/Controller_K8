@@ -118,6 +118,11 @@ travava o ambiente com erro de campo imutável.
 **Vencido, o ambiente cai mas o CR fica.** O objeto vira o registro de que
 aquele PR teve ambiente e de quando ele caiu.
 
+**Nome e rótulo de métrica são interface pública.** O alerta do cluster e o
+painel do Grafana moram em outro repositório e casam por string: trocar o
+valor `error` por `erro` não quebra compilação, quebra o alerta — que
+simplesmente para de disparar. Por isso o contrato está travado em teste.
+
 **O operator lê secret no cluster inteiro.** É a regra mais larga do
 `ClusterRole` e existe por um motivo só: copiar o pull secret do registry
 privado para o namespace do preview, já que `imagePullSecrets` é uma referência
@@ -162,6 +167,7 @@ O que os testes seguram, em ordem de importância:
 | Requeue no instante do vencimento | Ambiente vivo além do TTL, ou varredura cara |
 | O apiserver recusa spec inválido | Marcação de validação virar comentário decorativo |
 | Os defaults do CRD chegam ao objeto | Ambiente sem TTL, vivo para sempre |
+| Nome e rótulo de cada métrica | Alerta que para de disparar sem quebrar build nenhum |
 
 Três deles nasceram falhando e apontaram erro meu: status de Deployment é
 subresource até no client falso, a derrubada leva uma passada a mais porque o
