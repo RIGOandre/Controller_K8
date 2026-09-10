@@ -60,7 +60,7 @@ func TestHostFor(t *testing.T) {
 		querido    string
 	}{
 		{"monta do domínio base", env("acme/loja", 7), "preview.exemplo.dev", "pr-7-acme-loja.preview.exemplo.dev"},
-		{"spec.host manda", &PreviewEnvironment{Spec: PreviewEnvironmentSpec{Repository: "acme/loja", PullRequest: 7, Host: "fixo.exemplo.dev"}}, "preview.exemplo.dev", "fixo.exemplo.dev"},
+		{"spec.subdomain troca só o rótulo", &PreviewEnvironment{Spec: PreviewEnvironmentSpec{Repository: "acme/loja", PullRequest: 7, Subdomain: "fixo"}}, "preview.exemplo.dev", "fixo.preview.exemplo.dev"},
 		{"sem domínio não há host", env("acme/loja", 7), "", ""},
 		{"ponto sobrando no domínio", env("acme/loja", 7), ".preview.exemplo.dev", "pr-7-acme-loja.preview.exemplo.dev"},
 	}
@@ -70,6 +70,30 @@ func TestHostFor(t *testing.T) {
 				t.Fatalf("queria %q, veio %q", c.querido, got)
 			}
 		})
+	}
+}
+
+// O domínio é decisão do cluster. Aceitando hostname inteiro do spec, quem
+// abre o pull request escolheria qualquer nome no ingress controller
+// compartilhado — inclusive um nome interno sem Ingress — e passaria a
+// servi-lo a partir do container do PR.
+func TestSubdomainNaoEscapaDoDominioBase(t *testing.T) {
+	tentativas := []string{
+		"app.banco-interno.example.com",
+		"login.acme.com",
+		"../../etc",
+		"UPPER",
+	}
+	for _, tentativa := range tentativas {
+		pe := &PreviewEnvironment{Spec: PreviewEnvironmentSpec{Repository: "acme/loja", PullRequest: 7, Subdomain: tentativa}}
+		host := pe.HostFor("preview.exemplo.dev")
+		if !strings.HasSuffix(host, ".preview.exemplo.dev") {
+			t.Fatalf("subdomain %q escapou do domínio base: %q", tentativa, host)
+		}
+		rotulo, _, _ := strings.Cut(host, ".")
+		if errs := validation.IsDNS1123Label(rotulo); len(errs) > 0 {
+			t.Fatalf("subdomain %q gerou rótulo inválido %q: %v", tentativa, rotulo, errs)
+		}
 	}
 }
 
@@ -87,7 +111,7 @@ func TestTTLCaiNoDefaultQuandoNaoInformado(t *testing.T) {
 	if got := pe.TTLDuration(); got != DefaultTTL {
 		t.Fatalf("queria %s, veio %s", DefaultTTL, got)
 	}
-	pe.Spec.TTL = &metav1.Duration{Duration: -time.Hour}
+	pe.Spec.TTL = "-1h"
 	if got := pe.TTLDuration(); got != DefaultTTL {
 		t.Fatalf("TTL negativo devia cair no default, veio %s", got)
 	}
@@ -100,7 +124,7 @@ func TestExpiryContaDaCriacao(t *testing.T) {
 	criado := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
 	pe := env("acme/loja", 1)
 	pe.CreationTimestamp = metav1.NewTime(criado)
-	pe.Spec.TTL = &metav1.Duration{Duration: 3 * time.Hour}
+	pe.Spec.TTL = "3h"
 
 	if got := pe.ExpiryTime(); !got.Equal(criado.Add(3 * time.Hour)) {
 		t.Fatalf("queria %s, veio %s", criado.Add(3*time.Hour), got)

@@ -14,6 +14,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -174,8 +175,11 @@ func TestApiserverAplicaOsDefaultsDoCRD(t *testing.T) {
 		return amb.c.Get(amb.ctx, client.ObjectKeyFromObject(pe), &lido)
 	})
 
-	if lido.Spec.TTL.Duration != 24*time.Hour {
-		t.Fatalf("default de ttl não veio do CRD: %s", lido.Spec.TTL.Duration)
+	if lido.Spec.TTL != "24h" {
+		t.Fatalf("default de ttl não veio do CRD: %q", lido.Spec.TTL)
+	}
+	if lido.TTLDuration() != 24*time.Hour {
+		t.Fatalf("o default do CRD não vira duração: %s", lido.TTLDuration())
 	}
 	if lido.Spec.Port != 8080 {
 		t.Fatalf("default de port não veio do CRD: %d", lido.Spec.Port)
@@ -211,6 +215,121 @@ func TestApiserverRecusaSpecInvalido(t *testing.T) {
 				t.Fatal("o apiserver aceitou um spec que o schema devia recusar")
 			}
 		})
+	}
+}
+
+// O buraco que este teste fecha: metav1.Duration decodifica com
+// time.ParseDuration, e um schema de string pura aceitaria "24 horas". O
+// informer decodifica a LIST inteira de uma vez — um único objeto ruim, em
+// qualquer namespace, faria a LIST falhar em laço e o controller pararia de
+// reconciliar TODOS os ambientes do cluster, sem nada no status de ninguém.
+//
+// Passa por unstructured porque o tipo Go não representa esse valor: só dá
+// para escrevê-lo falando direto com o apiserver, que é exatamente o que um
+// `kubectl apply` faz.
+func TestApiserverRecusaTtlQueOGoNaoDecodifica(t *testing.T) {
+	amb := apiserver(t)
+
+	venenos := []string{"24 horas", "1 dia", "24", "abc", "-5h"}
+	for i, veneno := range venenos {
+		t.Run(veneno, func(t *testing.T) {
+			cr := &unstructured.Unstructured{Object: map[string]any{
+				"apiVersion": previewv1alpha1.GroupVersion.String(),
+				"kind":       "PreviewEnvironment",
+				"metadata": map[string]any{
+					"name":      fmt.Sprintf("veneno-%d", i),
+					"namespace": "previews",
+				},
+				"spec": map[string]any{
+					"repository":  "acme/loja",
+					"pullRequest": int64(1),
+					"image":       "ghcr.io/acme/loja:sha",
+					"ttl":         veneno,
+				},
+			}}
+			if err := amb.c.Create(amb.ctx, cr); err == nil {
+				t.Fatalf("o apiserver aceitou ttl=%q; um CR desses derruba o informer de todo o cluster", veneno)
+			}
+		})
+	}
+
+	// E o que o Go decodifica continua passando.
+	valido := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": previewv1alpha1.GroupVersion.String(),
+		"kind":       "PreviewEnvironment",
+		"metadata":   map[string]any{"name": "ttl-valido", "namespace": "previews"},
+		"spec": map[string]any{
+			"repository": "acme/loja", "pullRequest": int64(2),
+			"image": "ghcr.io/acme/loja:sha", "ttl": "1h30m",
+		},
+	}}
+	if err := amb.c.Create(amb.ctx, valido); err != nil {
+		t.Fatalf("o schema recusou um ttl válido: %v", err)
+	}
+}
+
+// repository e pullRequest decidem o nome do namespace. Editá-los trocaria o
+// destino e abandonaria o namespace antigo, com o workload dentro, consumindo
+// quota sem nenhum objeto que aponte para ele.
+func TestApiserverRecusaMudarRepositoryEPullRequest(t *testing.T) {
+	amb := apiserver(t)
+
+	pe := &previewv1alpha1.PreviewEnvironment{
+		ObjectMeta: metav1.ObjectMeta{Name: "imutavel", Namespace: "previews"},
+		Spec: previewv1alpha1.PreviewEnvironmentSpec{
+			Repository: "acme/loja", PullRequest: 3, Image: "ghcr.io/acme/loja:sha",
+		},
+	}
+	if err := amb.c.Create(amb.ctx, pe); err != nil {
+		t.Fatalf("criar: %v", err)
+	}
+
+	var lido previewv1alpha1.PreviewEnvironment
+	amb.ateQue("o objeto aparecer no cache", func() error {
+		return amb.c.Get(amb.ctx, client.ObjectKeyFromObject(pe), &lido)
+	})
+
+	trocado := lido.DeepCopy()
+	trocado.Spec.Repository = "outro/repo"
+	if err := amb.c.Update(amb.ctx, trocado); err == nil {
+		t.Fatal("o apiserver aceitou trocar repository; o namespace antigo ficaria órfão")
+	}
+
+	trocado = lido.DeepCopy()
+	trocado.Spec.PullRequest = 4
+	if err := amb.c.Update(amb.ctx, trocado); err == nil {
+		t.Fatal("o apiserver aceitou trocar pullRequest; o namespace antigo ficaria órfão")
+	}
+
+	// Imagem continua editável: é o que um push novo no PR muda.
+	trocado = lido.DeepCopy()
+	trocado.Spec.Image = "ghcr.io/acme/loja:def"
+	if err := amb.c.Update(amb.ctx, trocado); err != nil {
+		t.Fatalf("a imagem devia continuar editável: %v", err)
+	}
+}
+
+// env com valueFrom resolveria no namespace do preview, que é onde o pull
+// secret acaba de pousar — quem escreve o CR passaria a ler, dentro de uma
+// imagem que ele mesmo escolheu, qualquer Secret que o operator alcance.
+func TestApiserverRecusaEnvComValueFrom(t *testing.T) {
+	amb := apiserver(t)
+
+	pe := &previewv1alpha1.PreviewEnvironment{
+		ObjectMeta: metav1.ObjectMeta{Name: "env-roubado", Namespace: "previews"},
+		Spec: previewv1alpha1.PreviewEnvironmentSpec{
+			Repository: "acme/loja", PullRequest: 5, Image: "ghcr.io/acme/loja:sha",
+			Env: []corev1.EnvVar{{
+				Name: "ROUBADO",
+				ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "prod-db"},
+					Key:                  "password",
+				}},
+			}},
+		},
+	}
+	if err := amb.c.Create(amb.ctx, pe); err == nil {
+		t.Fatal("o apiserver aceitou env com valueFrom")
 	}
 }
 
@@ -296,6 +415,66 @@ func TestControllerMontaOAmbienteContraOApiserverDeVerdade(t *testing.T) {
 	if len(lido.Finalizers) == 0 || lido.Finalizers[0] != previewv1alpha1.Finalizer {
 		t.Fatalf("finalizer não persistiu: %v", lido.Finalizers)
 	}
+}
+
+// O client falso não mantém metadata.generation: só um apiserver de verdade
+// faz essa contabilidade, e é ela que separa "o Deployment respondeu à
+// alteração" de "o status ainda é o da revisão anterior". Sem esta checagem, o
+// ambiente anuncia Ready para uma geração cujos pods não existem.
+func TestNaoDizReadyComStatusDefasadoDoDeployment(t *testing.T) {
+	amb := apiserver(t)
+
+	pe := &previewv1alpha1.PreviewEnvironment{
+		ObjectMeta: metav1.ObjectMeta{Name: "pr-11", Namespace: "previews"},
+		Spec: previewv1alpha1.PreviewEnvironmentSpec{
+			Repository:  "acme/defasado",
+			PullRequest: 11,
+			Image:       "ghcr.io/acme/defasado:abc",
+		},
+	}
+	if err := amb.c.Create(amb.ctx, pe); err != nil {
+		t.Fatalf("criar: %v", err)
+	}
+
+	chave := types.NamespacedName{Namespace: pe.NamespaceName(), Name: deploymentName}
+	amb.ateQue("o deployment nascer", func() error {
+		var d appsv1.Deployment
+		return amb.c.Get(amb.ctx, chave, &d)
+	})
+
+	var deploy appsv1.Deployment
+	if err := amb.c.Get(amb.ctx, chave, &deploy); err != nil {
+		t.Fatal(err)
+	}
+	if deploy.Generation == 0 {
+		t.Fatal("o apiserver não atribuiu generation; o teste perderia o sentido")
+	}
+	// Números de uma revisão pronta, com o status ainda uma geração atrás.
+	deploy.Status.ObservedGeneration = deploy.Generation - 1
+	deploy.Status.Replicas = 1
+	deploy.Status.ReadyReplicas = 1
+	deploy.Status.UpdatedReplicas = 1
+	deploy.Status.AvailableReplicas = 1
+	deploy.Status.UnavailableReplicas = 0
+	if err := amb.c.Status().Update(amb.ctx, &deploy); err != nil {
+		t.Fatalf("gravar status do deployment: %v", err)
+	}
+
+	amb.ateQue("o ambiente ficar em Provisioning aguardando o rollout", func() error {
+		var lido previewv1alpha1.PreviewEnvironment
+		if err := amb.c.Get(amb.ctx, client.ObjectKeyFromObject(pe), &lido); err != nil {
+			return err
+		}
+		if lido.Status.Phase == previewv1alpha1.PhaseReady {
+			return &erroDeEspera{"anunciou Ready lendo status de uma revisão anterior"}
+		}
+		for _, c := range lido.Status.Conditions {
+			if c.Type == previewv1alpha1.ConditionReady && c.Reason == "AguardandoRollout" {
+				return nil
+			}
+		}
+		return &erroDeEspera{"ainda não reportou AguardandoRollout"}
+	})
 }
 
 type erroDeEspera struct{ msg string }

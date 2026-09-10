@@ -10,6 +10,9 @@ spec:
   image: ghcr.io/acme/loja:9f1c2ab
   port: 3000
   ttl: 8h
+  # Opcional: o rótulo que precede o domínio base do manager. Sem ele o
+  # operator monta pr-<numero>-<owner>-<repo>.
+  subdomain: loja-pr-42
   env:
     - name: NODE_ENV
       value: preview

@@ -41,11 +41,19 @@ const Finalizer = "preview.rigo.dev/cleanup"
 // PreviewEnvironmentSpec descreve o ambiente efêmero de um pull request.
 type PreviewEnvironmentSpec struct {
 	// Repository é o repositório de origem no formato owner/name.
+	//
+	// Imutável: o nome do namespace do preview deriva deste campo. Deixar
+	// editar troca o namespace de destino e abandona o antigo, com o workload
+	// dentro, consumindo quota sem nenhum objeto que aponte para ele.
 	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="repository é imutável: o namespace do preview deriva dele"
 	Repository string `json:"repository"`
 
 	// PullRequest é o número do PR que pediu o ambiente.
+	//
+	// Imutável, pelo mesmo motivo de repository.
 	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="pullRequest é imutável: o namespace do preview deriva dele"
 	PullRequest int32 `json:"pullRequest"`
 
 	// Commit é o SHA que gerou a imagem. Só informativo: vira label e evento.
@@ -74,24 +82,54 @@ type PreviewEnvironmentSpec struct {
 	// +optional
 	Replicas *int32 `json:"replicas,omitempty"`
 
-	// Env são as variáveis do container.
+	// Env são as variáveis do container, e só valores literais.
+	//
+	// valueFrom é recusado de propósito. Ele resolve no namespace do pod, que
+	// é onde o operator acabou de copiar o pull secret — quem escreve o CR
+	// passaria a ler, dentro de uma imagem que ele mesmo escolheu, qualquer
+	// Secret que o operator tenha alcançado. O operator não tem como saber se
+	// quem pediu tem direito àquele segredo, então não empresta o acesso dele.
+	// +kubebuilder:validation:XValidation:rule="self.all(e, !has(e.valueFrom))",message="env aceita só valor literal; valueFrom resolveria no namespace do preview com o acesso do operator"
 	// +optional
 	Env []corev1.EnvVar `json:"env,omitempty"`
 
-	// Host sobrescreve o hostname calculado a partir de --base-domain.
-	// Sem host e sem base domain o operator não cria Ingress.
+	// Subdomain é o rótulo que precede o domínio base do manager. Vazio, o
+	// operator calcula um a partir do repositório e do número do PR.
+	//
+	// É rótulo e não hostname inteiro de propósito. Aceitando hostname
+	// completo, quem abre o pull request escolheria qualquer nome no ingress
+	// controller compartilhado — inclusive um nome interno que ainda não tem
+	// Ingress — e passaria a servi-lo a partir do container do PR. O domínio
+	// é decisão do cluster, e o cluster a mantém.
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	// +kubebuilder:validation:MaxLength=63
 	// +optional
-	Host string `json:"host,omitempty"`
+	Subdomain string `json:"subdomain,omitempty"`
 
 	// TTL conta a partir da criação do objeto. Vencido, o ambiente é derrubado.
+	// Formato do time.ParseDuration do Go: "24h", "1h30m", "90m".
 	//
-	// É ponteiro por causa do default. metav1.Duration é struct, e `omitempty`
-	// não omite struct: o campo ia no corpo da requisição como "0s" mesmo sem
-	// ninguém ter pedido, o apiserver via valor presente e o default do CRD
-	// nunca era aplicado.
+	// É string e não metav1.Duration de propósito, e essa é a diferença entre
+	// um objeto ruim e um cluster parado. metav1.Duration decodifica dentro do
+	// informer com time.ParseDuration; um "24 horas" digitado em qualquer
+	// namespace faria a LIST inteira falhar, em laço, e o controller pararia
+	// de reconciliar TODOS os ambientes do cluster — sem nada no status de
+	// ninguém, só no log do manager. Com string, o pior caso é um ambiente
+	// cair no TTL padrão.
+	//
+	// O campo antes era ponteiro por causa do default: metav1.Duration é
+	// struct e `omitempty` não omite struct, então o campo ia na requisição
+	// como "0s" mesmo sem ninguém ter pedido e o default do CRD nunca era
+	// aplicado. String vazia omite sozinha.
+	// O teto e o piso vão em CEL porque o pattern não sabe comparar grandezas:
+	// "-5h" e "9999h" casam com o formato e são igualmente ruins — o primeiro
+	// nasce vencido, o segundo transforma ambiente efêmero em permanente.
+	//
+	// +kubebuilder:validation:Pattern=`^([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+$`
+	// +kubebuilder:validation:XValidation:rule="duration(self) > duration('0s') && duration(self) <= duration('168h')",message="ttl precisa ser positivo e no máximo 168h"
 	// +kubebuilder:default="24h"
 	// +optional
-	TTL *metav1.Duration `json:"ttl,omitempty"`
+	TTL string `json:"ttl,omitempty"`
 
 	// Resources do container. Sem valor, herda o default do manager.
 	// +optional

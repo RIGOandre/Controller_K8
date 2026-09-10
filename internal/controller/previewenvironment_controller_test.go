@@ -52,7 +52,7 @@ func novoAmbiente(mods ...func(*previewv1alpha1.PreviewEnvironment)) *previewv1a
 			Commit:      "abc1234",
 			Image:       "ghcr.io/acme/loja:abc1234",
 			Port:        3000,
-			TTL:         &metav1.Duration{Duration: time.Hour},
+			TTL:         "1h",
 		},
 	}
 	for _, m := range mods {
@@ -225,7 +225,13 @@ func TestViraReadyQuandoODeploymentFicaPronto(t *testing.T) {
 	if err := s.c.Get(ctx, chave, &deploy); err != nil {
 		t.Fatal(err)
 	}
+	// Ready exige a revisão ATUAL no ar, não só réplicas prontas: logo depois
+	// de o apply reescrever o pod template, ReadyReplicas ainda conta os pods
+	// da revisão anterior.
+	deploy.Status.ObservedGeneration = deploy.Generation
 	deploy.Status.ReadyReplicas = 1
+	deploy.Status.UpdatedReplicas = 1
+	deploy.Status.UnavailableReplicas = 0
 	// Status de Deployment é subresource até no client falso: Update comum
 	// descartaria a mudança em silêncio e o teste passaria por acidente.
 	if err := s.c.Status().Update(ctx, &deploy); err != nil {
@@ -396,9 +402,15 @@ func TestSemDominioNaoCriaIngress(t *testing.T) {
 
 func TestCopiaOPullSecretParaONamespaceDoPreview(t *testing.T) {
 	origem := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "ghcr", Namespace: "previews"},
-		Type:       corev1.SecretTypeDockerConfigJson,
-		Data:       map[string][]byte{".dockerconfigjson": []byte(`{"auths":{}}`)},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "ghcr",
+			Namespace: "previews",
+			// Consentimento de quem é dono do Secret. Sem o rótulo o operator
+			// recusa a cópia, mesmo que o spec cite o nome.
+			Labels: map[string]string{previewv1alpha1.LabelCopiavel: "true"},
+		},
+		Type: corev1.SecretTypeDockerConfigJson,
+		Data: map[string][]byte{".dockerconfigjson": []byte(`{"auths":{}}`)},
 	}
 	pe := novoAmbiente(func(p *previewv1alpha1.PreviewEnvironment) {
 		p.Spec.ImagePullSecrets = []corev1.LocalObjectReference{{Name: "ghcr"}}
@@ -419,18 +431,108 @@ func TestCopiaOPullSecretParaONamespaceDoPreview(t *testing.T) {
 	}
 }
 
-func TestPullSecretAusenteDevolveErro(t *testing.T) {
+// Secret que não existe é erro de configuração, não de momento: reenfileirar
+// com backoff para sempre só gasta o apiserver e deixa o status mentindo. Vira
+// Failed, e uma edição do spec dispara nova tentativa.
+func TestPullSecretAusenteViraFailed(t *testing.T) {
 	pe := novoAmbiente(func(p *previewv1alpha1.PreviewEnvironment) {
 		p.Spec.ImagePullSecrets = []corev1.LocalObjectReference{{Name: "nao-existe"}}
 	})
 	s := monta(t, criacao, pe)
 	s.reconcile(t, pe)
+	s.reconcile(t, pe)
 
-	_, err := s.r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Namespace: pe.Namespace, Name: pe.Name},
+	atual := s.lerAmbiente(t, pe)
+	if atual.Status.Phase != previewv1alpha1.PhaseFailed {
+		t.Fatalf("queria Failed, veio %q", atual.Status.Phase)
+	}
+	if atual.Status.ObservedGeneration == atual.Generation {
+		t.Fatal("observedGeneration foi carimbado sem o spec ter sido atendido")
+	}
+}
+
+// A cadeia completa: citar o nome de um Secret qualquer do namespace do CR e
+// lê-lo de dentro do container do PR. Sem as travas, quem só tinha permissão
+// de criar PreviewEnvironment passava a ler todo Secret que o operator alcança.
+func TestNaoCopiaSecretSemConsentimentoNemDeOutroTipo(t *testing.T) {
+	casos := []struct {
+		nome   string
+		origem *corev1.Secret
+	}{
+		{
+			"Opaque não é pull secret",
+			&corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "prod-db", Namespace: "previews",
+					Labels: map[string]string{previewv1alpha1.LabelCopiavel: "true"},
+				},
+				Type: corev1.SecretTypeOpaque,
+				Data: map[string][]byte{"password": []byte("s3nh4-de-producao")},
+			},
+		},
+		{
+			"sem o rótulo de consentimento",
+			&corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "prod-db", Namespace: "previews"},
+				Type:       corev1.SecretTypeDockerConfigJson,
+				Data:       map[string][]byte{".dockerconfigjson": []byte(`{"auths":{}}`)},
+			},
+		},
+	}
+
+	for _, caso := range casos {
+		t.Run(caso.nome, func(t *testing.T) {
+			pe := novoAmbiente(func(p *previewv1alpha1.PreviewEnvironment) {
+				p.Spec.ImagePullSecrets = []corev1.LocalObjectReference{{Name: "prod-db"}}
+			})
+			s := monta(t, criacao, pe, caso.origem)
+			s.reconcile(t, pe)
+			s.reconcile(t, pe)
+
+			var copia corev1.Secret
+			err := s.c.Get(context.Background(),
+				types.NamespacedName{Namespace: pe.NamespaceName(), Name: "prod-db"}, &copia)
+			if !apierrors.IsNotFound(err) {
+				t.Fatalf("o secret foi copiado para o namespace do PR: %v", err)
+			}
+			if fase := s.lerAmbiente(t, pe).Status.Phase; fase != previewv1alpha1.PhaseFailed {
+				t.Fatalf("queria Failed, veio %q", fase)
+			}
+		})
+	}
+}
+
+// valueFrom resolve no namespace do pod — que é onde o pull secret acabou de
+// pousar. O CRD recusa, e esta é a segunda tranca, para um cluster que ainda
+// não recebeu o schema novo.
+func TestEnvComValueFromNaoChegaAoContainer(t *testing.T) {
+	pe := novoAmbiente(func(p *previewv1alpha1.PreviewEnvironment) {
+		p.Spec.Env = []corev1.EnvVar{
+			{Name: "LEGITIMO", Value: "ok"},
+			{Name: "ROUBADO", ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "prod-db"},
+					Key:                  "password",
+				},
+			}},
+		}
 	})
-	if err == nil {
-		t.Fatal("secret ausente devia devolver erro para o controller tentar de novo")
+	s := monta(t, criacao, pe)
+	s.reconcile(t, pe)
+	s.reconcile(t, pe)
+
+	var deploy appsv1.Deployment
+	if err := s.c.Get(context.Background(),
+		types.NamespacedName{Namespace: pe.NamespaceName(), Name: deploymentName}, &deploy); err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range deploy.Spec.Template.Spec.Containers[0].Env {
+		if v.ValueFrom != nil {
+			t.Fatalf("valueFrom chegou ao container: %s", v.Name)
+		}
+	}
+	if len(deploy.Spec.Template.Spec.Containers[0].Env) != 1 {
+		t.Fatalf("a variável literal devia ter sobrevivido: %v", deploy.Spec.Template.Spec.Containers[0].Env)
 	}
 }
 

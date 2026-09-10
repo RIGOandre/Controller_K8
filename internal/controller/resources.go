@@ -39,6 +39,74 @@ type Config struct {
 	DefaultResources corev1.ResourceRequirements
 }
 
+// sanitizarEnv derruba qualquer entrada com valueFrom.
+//
+// O CRD já recusa isso, e esta é a segunda tranca: valueFrom resolve no
+// namespace do pod, que é onde o operator acaba de copiar o pull secret.
+// Quem escreve o CR passaria a ler, dentro de uma imagem que ele mesmo
+// escolheu, qualquer Secret que o operator alcance — emprestando o acesso do
+// operator a uma requisição que não carrega autorização nenhuma. Um CRD
+// antigo num cluster que ainda não recebeu o schema novo não pode reabrir
+// esse caminho.
+func sanitizarEnv(env []corev1.EnvVar) []corev1.EnvVar {
+	limpo := make([]corev1.EnvVar, 0, len(env))
+	for _, v := range env {
+		if v.ValueFrom != nil {
+			continue
+		}
+		limpo = append(limpo, v)
+	}
+	if len(limpo) == 0 {
+		return nil
+	}
+	return limpo
+}
+
+// aplicarNoDeployment escreve no Deployment só os campos que o operator
+// possui, preservando o que o apiserver preencheu.
+//
+// A versão anterior substituía o PodTemplateSpec inteiro por um construído em
+// memória. Como o objeto lido do cluster carrega os defaults do apiserver
+// (terminationMessagePath, imagePullPolicy, dnsPolicy, schedulerName...) e o
+// desejado vinha zerado, o DeepEqual do CreateOrUpdate dava diferente em toda
+// passada: um PUT do Deployment inteiro por reconcile, sem nada mudar, e um
+// OperationResult que nunca dizia a verdade.
+func aplicarNoDeployment(deploy *appsv1.Deployment, pe *previewv1alpha1.PreviewEnvironment, cfg Config) {
+	desejado := deploymentSpec(pe, cfg)
+
+	deploy.Labels = mergeLabels(deploy.Labels, pe.CommonLabels(), selectorLabels())
+	// Selector é imutável no Deployment: sobrescrever num objeto que já existe
+	// devolve erro de campo imutável e trava o reconcile para sempre. Só é
+	// preenchido na criação.
+	if deploy.Spec.Selector == nil {
+		deploy.Spec.Selector = desejado.Selector
+	}
+	deploy.Spec.Replicas = desejado.Replicas
+	deploy.Spec.Template.Labels = mergeLabels(deploy.Spec.Template.Labels, desejado.Template.Labels)
+	deploy.Spec.Template.Spec.ImagePullSecrets = desejado.Template.Spec.ImagePullSecrets
+
+	querido := desejado.Template.Spec.Containers[0]
+	indice := -1
+	for i := range deploy.Spec.Template.Spec.Containers {
+		if deploy.Spec.Template.Spec.Containers[i].Name == containerName {
+			indice = i
+			break
+		}
+	}
+	if indice < 0 {
+		deploy.Spec.Template.Spec.Containers = append(deploy.Spec.Template.Spec.Containers, querido)
+		return
+	}
+
+	atual := &deploy.Spec.Template.Spec.Containers[indice]
+	atual.Image = querido.Image
+	atual.Ports = querido.Ports
+	atual.Env = querido.Env
+	atual.Resources = querido.Resources
+	atual.ReadinessProbe = querido.ReadinessProbe
+	atual.SecurityContext = querido.SecurityContext
+}
+
 // selectorLabels são os únicos rótulos que entram no selector do Deployment.
 // Selector é imutável depois de criado: se `CommonLabels` entrasse aqui,
 // mudar o commit no spec quebraria o update com erro de campo imutável.
@@ -129,7 +197,7 @@ func deploymentSpec(pe *previewv1alpha1.PreviewEnvironment, cfg Config) appsv1.D
 						ContainerPort: port,
 						Protocol:      corev1.ProtocolTCP,
 					}},
-					Env:       pe.Spec.Env,
+					Env:       sanitizarEnv(pe.Spec.Env),
 					Resources: resources,
 					// Sonda de TCP e não de HTTP: o operator não conhece a
 					// rota de saúde da aplicação do PR, e chutar /healthz

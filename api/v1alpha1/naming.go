@@ -25,6 +25,12 @@ const (
 	// ManagedByValue identifica quem escreveu o objeto.
 	ManagedByValue = "preview-operator"
 
+	// LabelCopiavel é o consentimento do dono de um Secret para ele ser
+	// copiado para dentro do namespace de um preview. Sem ele, bastava citar
+	// o nome de qualquer Secret no spec para o operator entregá-lo a um pod
+	// que roda código de pull request.
+	LabelCopiavel = "preview.rigo.dev/copiavel"
+
 	// maxLabelLen é o teto de um label DNS-1123, que é o formato de nome de
 	// namespace e de cada rótulo de host.
 	maxLabelLen = 63
@@ -83,26 +89,36 @@ func (pe *PreviewEnvironment) NamespaceName() string {
 	return fit(fmt.Sprintf("preview-%s-%d", pe.RepositorySlug(), pe.Spec.PullRequest), maxLabelLen)
 }
 
-// HostFor devolve o hostname do Ingress. spec.host manda; sem ele, monta a
-// partir do domínio base do manager. Sem os dois, devolve vazio e o
-// controller não cria Ingress nenhum.
+// HostFor devolve o hostname do Ingress: o rótulo de spec.subdomain, ou um
+// calculado a partir do repositório e do PR, sempre concatenado ao domínio
+// base do manager. Sem domínio base não há Ingress — e não há como o CR
+// escolher um hostname fora do domínio do cluster.
 func (pe *PreviewEnvironment) HostFor(baseDomain string) string {
-	if pe.Spec.Host != "" {
-		return pe.Spec.Host
-	}
 	if baseDomain == "" {
 		return ""
 	}
-	sub := fit(fmt.Sprintf("pr-%d-%s", pe.Spec.PullRequest, pe.RepositorySlug()), maxLabelLen)
-	return sub + "." + strings.TrimPrefix(baseDomain, ".")
+	rotulo := pe.Spec.Subdomain
+	if rotulo == "" {
+		rotulo = fmt.Sprintf("pr-%d-%s", pe.Spec.PullRequest, pe.RepositorySlug())
+	}
+	return fit(slug(rotulo), maxLabelLen) + "." + strings.TrimPrefix(baseDomain, ".")
 }
 
 // TTLDuration é o TTL efetivo, com piso no default.
+//
+// O parse é tolerante de propósito: o CRD já recusa o que não decodifica, e
+// aqui um valor impossível vira o default em vez de erro. Um ambiente com TTL
+// padrão é um incidente pequeno; um reconcile que falha por causa de um campo
+// de texto é um ambiente que nunca é derrubado.
 func (pe *PreviewEnvironment) TTLDuration() time.Duration {
-	if pe.Spec.TTL == nil || pe.Spec.TTL.Duration <= 0 {
+	if pe.Spec.TTL == "" {
 		return DefaultTTL
 	}
-	return pe.Spec.TTL.Duration
+	d, err := time.ParseDuration(pe.Spec.TTL)
+	if err != nil || d <= 0 {
+		return DefaultTTL
+	}
+	return d
 }
 
 // ExpiryTime é o instante do vencimento, contado da criação do objeto.

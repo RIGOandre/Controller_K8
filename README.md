@@ -127,7 +127,40 @@ simplesmente para de disparar. Por isso o contrato está travado em teste.
 `ClusterRole` e existe por um motivo só: copiar o pull secret do registry
 privado para o namespace do preview, já que `imagePullSecrets` é uma referência
 local ao namespace do pod. Quem publica imagem pública pode apagar a regra e o
-resto continua funcionando.
+resto continua funcionando. Secret fica fora do cache do manager — com watch em
+tudo, o processo guardaria na memória todo secret de todo namespace, e ele é o
+alvo mais valioso do cluster.
+
+**Copiar um secret exige consentimento de quem é dono dele.** O nome em
+`spec.imagePullSecrets` é texto livre escolhido por quem abre o pull request.
+Sem trava, bastava citar qualquer secret do namespace do CR para o operator
+entregá-lo a um pod que roda código de PR — o operator emprestando o acesso
+dele a uma requisição que não carrega autorização nenhuma. Hoje são três
+travas: só tipo `dockerconfigjson`, só a chave do registry, e só com o rótulo
+`preview.rigo.dev/copiavel: "true"` no secret de origem.
+
+**`spec.env` aceita valor literal e nada mais.** `valueFrom` resolveria no
+namespace do preview — que é onde o pull secret acabou de pousar. O CRD recusa
+e o controller descarta: duas trancas, porque um cluster com o CRD antigo
+reabriria o caminho sozinho.
+
+**O domínio é decisão do cluster, não do pull request.** Por isso `spec.subdomain`
+é um rótulo DNS, não um hostname inteiro: aceitando hostname completo, quem abre
+o PR reivindicaria qualquer nome no ingress controller compartilhado — inclusive
+um nome interno que ainda não tem Ingress — e passaria a servi-lo a partir do
+container dele.
+
+**`spec.ttl` é `string`, não `metav1.Duration`.** A diferença é entre um objeto
+ruim e um cluster parado: `metav1.Duration` decodifica dentro do informer, e um
+`ttl: "24 horas"` digitado em qualquer namespace faria a LIST inteira falhar em
+laço — o controller pararia de reconciliar **todos** os ambientes do cluster,
+sem nada no status de ninguém. Com string, o pior caso é um ambiente cair no TTL
+padrão. O schema recusa o formato errado; o parse no controller é tolerante de
+propósito.
+
+**`repository` e `pullRequest` são imutáveis.** O nome do namespace deriva
+deles: editar trocaria o destino e abandonaria o namespace antigo com o workload
+dentro, consumindo quota sem nenhum objeto que aponte para ele.
 
 ---
 
@@ -135,11 +168,11 @@ resto continua funcionando.
 
 ```
 $ go test ./... -race -cover
-ok  github.com/RIGOandre/Controller_K8/api/v1alpha1        coverage: 34.0%
-ok  github.com/RIGOandre/Controller_K8/internal/controller  coverage: 86.6%
+ok  github.com/RIGOandre/Controller_K8/api/v1alpha1        coverage: 37.3%
+ok  github.com/RIGOandre/Controller_K8/internal/controller  coverage: 88.4%
 ```
 
-31 casos, em duas camadas. Os 34% do pacote da API são cobertura diluída pelo
+60 casos, em duas camadas. Os 37% do pacote da API são cobertura diluída pelo
 `zz_generated.deepcopy.go`, que é gerado e não tem decisão dentro.
 
 **Com `fake client`**, sem etcd e sem apiserver, para a decisão do reconcile —
@@ -168,6 +201,13 @@ O que os testes seguram, em ordem de importância:
 | O apiserver recusa spec inválido | Marcação de validação virar comentário decorativo |
 | Os defaults do CRD chegam ao objeto | Ambiente sem TTL, vivo para sempre |
 | Nome e rótulo de cada métrica | Alerta que para de disparar sem quebrar build nenhum |
+| Namespace que já existe não é adotado | A guarda do teardown conferir o rótulo que o próprio apply escreveu |
+| Dois ambientes com o mesmo nome derivado não se derrubam | Um preview apagar o preview de outro time |
+| Ready exige a revisão atual no ar | Revisor aprovar o PR olhando o commit anterior |
+| Erro no apply não carimba observedGeneration | Status afirmando convergência que não houve |
+| Vencimento no meio da passada derruba o ambiente | Requeue negativo, descartado em silêncio, ambiente vivo por horas |
+| O apiserver recusa `ttl` que o Go não decodifica | Um CR digitado errado parar o operator inteiro |
+| `env` com `valueFrom` não chega ao container | PR lendo qualquer secret que o operator alcance |
 
 Três deles nasceram falhando e apontaram erro meu: status de Deployment é
 subresource até no client falso, a derrubada leva uma passada a mais porque o
@@ -179,6 +219,36 @@ código, e passa `kubeconform` em todo manifest — inclusive no sample do
 sample passava *pulado*, e um campo digitado errado chegaria ao cluster.
 
 ---
+
+## A revisão
+
+Depois de o repositório estar de pé e o CI verde, rodei uma revisão adversarial
+em cima dele: seis leitores independentes, um por dimensão de risco
+(reconcile, finalizer, uso da API do Kubernetes, métricas, segurança, e "os
+testes provam o que dizem provar"), e cada achado passou por dois céticos
+encarregados de refutá-lo — um relendo o código, outro obrigado a escrever um
+teste que reproduzisse o problema.
+
+Saíram 24 achados; 23 sobreviveram. Os piores não eram bugs de digitação:
+
+- O ambiente anunciava **Ready** logo depois de um commit novo, lendo o status
+  de uma revisão do Deployment que ainda não tinha rolado. Com `replicas: 1` o
+  `maxUnavailable` padrão é zero, então o pod antigo continua pronto para
+  sempre se a imagem nova não sobe — o revisor aprovaria o PR olhando o commit
+  anterior, e o gate do workflow liberaria o merge.
+- Um `ttl: "24 horas"` em **qualquer** namespace parava o operator inteiro.
+- O `CreateOrUpdate` do namespace **adotava** um namespace que já existisse e
+  carimbava nele o rótulo `managed-by` — a guarda do teardown, que existe para
+  não apagar namespace de terceiro, passou a conferir o rótulo que o próprio
+  apply tinha acabado de escrever.
+- `RequeueAfter` podia sair negativo quando o TTL vencia no meio da passada, e
+  o controller-runtime só agenda com valor positivo: o despertar sumia sem erro
+  nenhum, e o ambiente ficava de pé até o resync do informer, que é de horas.
+
+Cada correção tem um teste. E cada teste foi conferido quebrando a correção de
+propósito, para provar que ele falha sem ela — dois deles passavam pelo motivo
+errado e precisaram ser reescritos, e um só era possível contra um apiserver de
+verdade, porque o `fake client` não faz a contabilidade de `metadata.generation`.
 
 ## Estado
 

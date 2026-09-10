@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -23,6 +24,19 @@ import (
 
 	previewv1alpha1 "github.com/RIGOandre/Controller_K8/api/v1alpha1"
 )
+
+// erroPermanente marca a falha que nova tentativa não resolve: spec apontando
+// para o que não existe, namespace de outro dono, permissão negada. Ela vira
+// PhaseFailed em vez de retry infinito com o status mentindo que está tudo no
+// ar. O controller-runtime não distingue os dois casos sozinho — para ele todo
+// erro devolvido é motivo de reenfileirar.
+type erroPermanente struct{ motivo, mensagem string }
+
+func (e *erroPermanente) Error() string { return e.mensagem }
+
+func permanente(motivo, formato string, args ...any) *erroPermanente {
+	return &erroPermanente{motivo: motivo, mensagem: fmt.Sprintf(formato, args...)}
+}
 
 // terminatingRequeue é o intervalo de espera enquanto um namespace ainda
 // está em Terminating. Não é polling de estado normal: só acontece durante a
@@ -100,38 +114,89 @@ func (r *PreviewEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl.R
 	).Set(float64(expiry.Unix()))
 
 	if err := r.apply(ctx, &pe); err != nil {
-		r.setProgressing(&pe, metav1.ConditionTrue, "ErroAoAplicar", err.Error())
-		if statusErr := r.publishStatus(ctx, &pe); statusErr != nil {
-			log.FromContext(ctx).Error(statusErr, "falha ao gravar status depois do erro de aplicação")
-		}
-		return ctrl.Result{}, err
+		return r.falhar(ctx, &pe, err)
 	}
 
 	if err := r.observe(ctx, &pe); err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := r.publishStatus(ctx, &pe); err != nil {
+	if err := r.publishStatus(ctx, &pe, true); err != nil {
 		return ctrl.Result{}, err
 	}
 	r.refreshActiveGauge(ctx)
 
+	// O vencimento é reconferido aqui, e não subtraído do que foi lido lá em
+	// cima. Entre a checagem do topo e este ponto rodou o reconcile inteiro —
+	// seis chamadas à API, uma gravação de status e uma listagem. Se o TTL
+	// venceu nesse intervalo, a subtração sai negativa, e o controller-runtime
+	// só agenda com RequeueAfter > 0: valor negativo cai no Forget(req) e o
+	// despertar some sem erro nenhum. O ambiente ficaria de pé até um evento
+	// alheio ou o resync do informer, que é de horas.
+	espera := expiry.Sub(r.now())
+	if espera <= 0 {
+		return r.expire(ctx, &pe)
+	}
+
 	// Requeue no instante exato do vencimento. Uma varredura periódica
 	// custaria uma passada em todos os ambientes a cada tique para acertar o
 	// vencimento de um; aqui cada ambiente acorda uma vez, na hora dele.
-	return ctrl.Result{RequeueAfter: expiry.Sub(r.now())}, nil
+	return ctrl.Result{RequeueAfter: espera}, nil
+}
+
+// falhar publica o erro no status sem afirmar convergência.
+//
+// A versão anterior mexia só na condition Progressing e ainda assim carimbava
+// observedGeneration. O par (phase: Ready, observedGeneration: N) sobrevivia a
+// um apply quebrado: quem lesse o objeto — ou o gate do workflow — concluía
+// que a geração N estava no ar enquanto todas as passadas falhavam.
+func (r *PreviewEnvironmentReconciler) falhar(ctx context.Context, pe *previewv1alpha1.PreviewEnvironment, err error) (ctrl.Result, error) {
+	var permanente *erroPermanente
+	definitivo := errors.As(err, &permanente)
+
+	motivo := "ErroAoAplicar"
+	if definitivo {
+		motivo = permanente.motivo
+	}
+
+	// Unknown e não False: o operator não sabe mais em que estado o ambiente
+	// está, e dizer "não está pronto" seria uma afirmação que ele não pode
+	// sustentar.
+	r.setReady(pe, metav1.ConditionUnknown, motivo, err.Error())
+	r.setProgressing(pe, boolParaCondition(!definitivo), motivo, err.Error())
+	if definitivo {
+		r.transition(pe, previewv1alpha1.PhaseFailed)
+		pe.Status.URL = ""
+		r.event(pe, corev1.EventTypeWarning, motivo, err.Error())
+	}
+
+	if statusErr := r.publishStatus(ctx, pe, false); statusErr != nil {
+		log.FromContext(ctx).Error(statusErr, "falha ao gravar status depois do erro de aplicação")
+	}
+
+	// Erro definitivo não volta para a fila: reenfileirar com backoff um spec
+	// que aponta para o que não existe só gasta o apiserver. Uma edição do
+	// spec dispara novo evento e nova tentativa.
+	if definitivo {
+		return ctrl.Result{}, nil
+	}
+	return ctrl.Result{}, err
+}
+
+func boolParaCondition(v bool) metav1.ConditionStatus {
+	if v {
+		return metav1.ConditionTrue
+	}
+	return metav1.ConditionFalse
 }
 
 // apply garante namespace, quota, pull secrets, deployment, service e
 // ingress. Idempotente: rodar duas vezes seguidas não muda nada na segunda.
 func (r *PreviewEnvironmentReconciler) apply(ctx context.Context, pe *previewv1alpha1.PreviewEnvironment) error {
-	ns := namespaceFor(pe)
-	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, ns, func() error {
-		ns.Labels = mergeLabels(ns.Labels, namespaceFor(pe).Labels)
-		return nil
-	}); err != nil {
-		return fmt.Errorf("namespace %s: %w", ns.Name, err)
+	ns, err := r.garantirNamespace(ctx, pe)
+	if err != nil {
+		return err
 	}
-	pe.Status.Namespace = ns.Name
+	pe.Status.Namespace = ns
 
 	quota := quotaFor(pe, r.Config)
 	desiredQuota := quota.Spec
@@ -147,18 +212,9 @@ func (r *PreviewEnvironmentReconciler) apply(ctx context.Context, pe *previewv1a
 		return err
 	}
 
-	deploy := deploymentFor(pe, r.Config)
-	desiredDeploy := deploymentSpec(pe, r.Config)
+	deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: deploymentName, Namespace: pe.NamespaceName()}}
 	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, deploy, func() error {
-		deploy.Labels = mergeLabels(deploy.Labels, pe.CommonLabels(), selectorLabels())
-		// Selector é imutável no Deployment: sobrescrever num objeto que já
-		// existe devolve erro de campo imutável e trava o reconcile para
-		// sempre. Só é preenchido na criação.
-		if deploy.Spec.Selector == nil {
-			deploy.Spec.Selector = desiredDeploy.Selector
-		}
-		deploy.Spec.Replicas = desiredDeploy.Replicas
-		deploy.Spec.Template = desiredDeploy.Template
+		aplicarNoDeployment(deploy, pe, r.Config)
 		return nil
 	}); err != nil {
 		return fmt.Errorf("deployment: %w", err)
@@ -201,6 +257,65 @@ func (r *PreviewEnvironmentReconciler) apply(ctx context.Context, pe *previewv1a
 	return nil
 }
 
+// garantirNamespace cria o namespace do ambiente, e recusa adotar um que já
+// exista sem ser deste PreviewEnvironment.
+//
+// A versão anterior usava CreateOrUpdate, que adota: se um namespace com o
+// nome derivado já existisse — de outro ambiente, ou de qualquer time do
+// cluster — o reconcile carimbava nele o rótulo managed-by e passava a
+// tratá-lo como seu. O guard do teardown, que existe justamente para não
+// apagar namespace de terceiro, virava letra morta: ele conferia o rótulo que
+// o próprio apply tinha acabado de escrever.
+func (r *PreviewEnvironmentReconciler) garantirNamespace(ctx context.Context, pe *previewv1alpha1.PreviewEnvironment) (string, error) {
+	desejado := namespaceFor(pe)
+
+	var atual corev1.Namespace
+	err := r.Get(ctx, types.NamespacedName{Name: desejado.Name}, &atual)
+	switch {
+	case apierrors.IsNotFound(err):
+		if err := r.Create(ctx, desejado); err != nil && !apierrors.IsAlreadyExists(err) {
+			return "", fmt.Errorf("criar namespace %s: %w", desejado.Name, err)
+		}
+		return desejado.Name, nil
+	case err != nil:
+		return "", fmt.Errorf("ler namespace %s: %w", desejado.Name, err)
+	}
+
+	if !nosso(&atual, pe) {
+		return "", permanente("NamespaceOcupado",
+			"o namespace %s já existe e não pertence a este ambiente; nada foi alterado nele", desejado.Name)
+	}
+
+	// Namespace nosso: só reforça os rótulos, sem tocar em nada mais.
+	if !contemTodos(atual.Labels, desejado.Labels) {
+		atual.Labels = mergeLabels(atual.Labels, desejado.Labels)
+		if err := r.Update(ctx, &atual); err != nil {
+			return "", fmt.Errorf("atualizar rótulos do namespace %s: %w", desejado.Name, err)
+		}
+	}
+	return desejado.Name, nil
+}
+
+// nosso responde se o objeto foi criado por este operator PARA este
+// PreviewEnvironment. Conferir só managed-by não basta: o nome do namespace
+// deriva de repositório e PR, e dois CRs em namespaces diferentes derivam o
+// mesmo nome — um derrubaria o ambiente do outro achando que era seu.
+func nosso(obj client.Object, pe *previewv1alpha1.PreviewEnvironment) bool {
+	l := obj.GetLabels()
+	return l[previewv1alpha1.LabelManagedBy] == previewv1alpha1.ManagedByValue &&
+		l[previewv1alpha1.LabelOwnerNamespace] == pe.Namespace &&
+		l[previewv1alpha1.LabelOwnerName] == pe.Name
+}
+
+func contemTodos(atual, querido map[string]string) bool {
+	for chave, valor := range querido {
+		if atual[chave] != valor {
+			return false
+		}
+	}
+	return true
+}
+
 // copyPullSecrets replica no namespace do preview os secrets de registry
 // citados no spec. ImagePullSecrets é uma referência local ao namespace do
 // pod, e o namespace do pod acabou de nascer vazio — sem a cópia, imagem de
@@ -210,17 +325,37 @@ func (r *PreviewEnvironmentReconciler) copyPullSecrets(ctx context.Context, pe *
 		var src corev1.Secret
 		if err := r.Get(ctx, types.NamespacedName{Namespace: pe.Namespace, Name: ref.Name}, &src); err != nil {
 			if apierrors.IsNotFound(err) {
-				r.event(pe, corev1.EventTypeWarning, "PullSecretAusente",
-					fmt.Sprintf("secret %q não existe em %s", ref.Name, pe.Namespace))
+				return permanente("PullSecretAusente",
+					"o secret %q não existe em %s", ref.Name, pe.Namespace)
 			}
 			return fmt.Errorf("pull secret %s: %w", ref.Name, err)
+		}
+
+		// Duas travas antes de copiar. Sem elas, bastava citar o nome de
+		// qualquer Secret do namespace do CR para o operator entregá-lo a um
+		// pod que roda código de pull request — o operator emprestaria o
+		// acesso de leitura dele a uma requisição que não carrega autorização
+		// nenhuma.
+		if src.Type != corev1.SecretTypeDockerConfigJson {
+			return permanente("PullSecretDeTipoErrado",
+				"o secret %s é do tipo %s; só %s pode ser copiado para o preview",
+				ref.Name, src.Type, corev1.SecretTypeDockerConfigJson)
+		}
+		if src.Labels[previewv1alpha1.LabelCopiavel] != "true" {
+			return permanente("PullSecretSemConsentimento",
+				"o secret %s não tem o rótulo %s=true; quem é dono dele precisa autorizar a cópia",
+				ref.Name, previewv1alpha1.LabelCopiavel)
 		}
 
 		dst := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: ref.Name, Namespace: pe.NamespaceName()}}
 		if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, dst, func() error {
 			dst.Labels = mergeLabels(dst.Labels, pe.CommonLabels())
 			dst.Type = src.Type
-			dst.Data = src.Data
+			// Só a chave do registry. Copiar o Data inteiro levaria junto
+			// qualquer outra chave que o Secret carregue.
+			dst.Data = map[string][]byte{
+				corev1.DockerConfigJsonKey: src.Data[corev1.DockerConfigJsonKey],
+			}
 			return nil
 		}); err != nil {
 			return fmt.Errorf("copiar pull secret %s: %w", ref.Name, err)
@@ -249,18 +384,59 @@ func (r *PreviewEnvironmentReconciler) observe(ctx context.Context, pe *previewv
 		desired = *deploy.Spec.Replicas
 	}
 
-	if deploy.Status.ReadyReplicas >= desired && desired > 0 {
+	// Status defasado não vale como resposta. Logo depois de o apply reescrever
+	// o pod template, o status do Deployment ainda é o da revisão anterior: o
+	// controller do Deployment nem reagiu. Ler ReadyReplicas ali diria Ready
+	// para uma geração cujos pods não existem.
+	if deploy.Status.ObservedGeneration < deploy.Generation {
+		r.transition(pe, previewv1alpha1.PhaseProvisioning)
+		r.setReady(pe, metav1.ConditionFalse, "AguardandoRollout",
+			"o Deployment ainda não reagiu à última alteração")
+		r.setProgressing(pe, metav1.ConditionTrue, "AguardandoRollout", "rollout ainda não começou")
+		return nil
+	}
+
+	// Rollout travado é falha, não espera. Com replicas=1 o maxUnavailable
+	// padrão é zero: o pod antigo só cai quando o novo fica pronto. Se a
+	// imagem nova não sobe, o pod velho segue Ready para sempre e
+	// ReadyReplicas fica em 1 — o ambiente anunciaria Ready servindo o commit
+	// anterior, indefinidamente.
+	if travado := condicaoDoDeployment(&deploy, appsv1.DeploymentProgressing); travado != nil &&
+		travado.Status == corev1.ConditionFalse && travado.Reason == "ProgressDeadlineExceeded" {
+		r.transition(pe, previewv1alpha1.PhaseFailed)
+		pe.Status.URL = ""
+		r.setReady(pe, metav1.ConditionFalse, "RolloutTravado", travado.Message)
+		r.setProgressing(pe, metav1.ConditionFalse, "RolloutTravado", travado.Message)
+		return nil
+	}
+
+	pronto := desired > 0 &&
+		deploy.Status.UpdatedReplicas >= desired &&
+		deploy.Status.ReadyReplicas >= desired &&
+		deploy.Status.UnavailableReplicas == 0
+
+	if pronto {
 		r.transition(pe, previewv1alpha1.PhaseReady)
 		r.setReady(pe, metav1.ConditionTrue, "Disponivel",
-			fmt.Sprintf("%d de %d réplicas prontas", deploy.Status.ReadyReplicas, desired))
+			fmt.Sprintf("%d de %d réplicas prontas na revisão atual", deploy.Status.ReadyReplicas, desired))
 		r.setProgressing(pe, metav1.ConditionFalse, "Concluido", "ambiente no ar")
 		return nil
 	}
 
 	r.transition(pe, previewv1alpha1.PhaseProvisioning)
-	r.setReady(pe, metav1.ConditionFalse, "Subindo",
-		fmt.Sprintf("%d de %d réplicas prontas", deploy.Status.ReadyReplicas, desired))
-	r.setProgressing(pe, metav1.ConditionTrue, "Subindo", "aguardando as réplicas ficarem prontas")
+	detalhe := fmt.Sprintf("%d de %d réplicas prontas, %d atualizadas, %d indisponíveis",
+		deploy.Status.ReadyReplicas, desired, deploy.Status.UpdatedReplicas, deploy.Status.UnavailableReplicas)
+	r.setReady(pe, metav1.ConditionFalse, "Subindo", detalhe)
+	r.setProgressing(pe, metav1.ConditionTrue, "Subindo", detalhe)
+	return nil
+}
+
+func condicaoDoDeployment(deploy *appsv1.Deployment, tipo appsv1.DeploymentConditionType) *appsv1.DeploymentCondition {
+	for i := range deploy.Status.Conditions {
+		if deploy.Status.Conditions[i].Type == tipo {
+			return &deploy.Status.Conditions[i]
+		}
+	}
 	return nil
 }
 
@@ -286,7 +462,7 @@ func (r *PreviewEnvironmentReconciler) expire(ctx context.Context, pe *previewv1
 	}
 	setCondition(pe, meta)
 
-	if err := r.publishStatus(ctx, pe); err != nil {
+	if err := r.publishStatus(ctx, pe, true); err != nil {
 		return ctrl.Result{}, err
 	}
 	if !gone {
@@ -326,7 +502,7 @@ func (r *PreviewEnvironmentReconciler) finalize(ctx context.Context, pe *preview
 		r.setReady(pe, metav1.ConditionFalse, "EmRemocao",
 			fmt.Sprintf("aguardando o namespace %s sair de Terminating", pe.NamespaceName()))
 		r.setProgressing(pe, metav1.ConditionTrue, "EmRemocao", "removendo o ambiente")
-		if err := r.publishStatus(ctx, pe); err != nil {
+		if err := r.publishStatus(ctx, pe, true); err != nil {
 			// Status é diagnóstico: não vale travar a remoção por causa dele.
 			// Um conflito aqui é comum — o objeto está sendo apagado.
 			log.FromContext(ctx).V(1).Info("não consegui publicar o status durante a remoção", "erro", err)
@@ -357,12 +533,19 @@ func (r *PreviewEnvironmentReconciler) teardown(ctx context.Context, pe *preview
 		return false, fmt.Errorf("ler namespace: %w", err)
 	}
 
-	// Um namespace com o mesmo nome que não seja nosso não é apagado. O nome
-	// é derivado do repositório e do PR, mas nada impede alguém de ter criado
-	// um namespace assim na mão antes.
-	if ns.Labels[previewv1alpha1.LabelManagedBy] != previewv1alpha1.ManagedByValue {
-		r.event(pe, corev1.EventTypeWarning, "NamespaceDeTerceiro",
-			fmt.Sprintf("namespace %s existe e não foi criado por este operator; não será apagado", ns.Name))
+	// Só apaga o que é deste ambiente. Conferir apenas managed-by não bastava:
+	// o nome do namespace deriva de repositório e PR, e dois PreviewEnvironment
+	// em namespaces diferentes derivam o mesmo nome — um derrubaria o ambiente
+	// do outro achando que era seu.
+	if !nosso(&ns, pe) {
+		// Solta o finalizer mesmo assim, de propósito. Segurar aqui deixaria o
+		// CR impossível de apagar sem editar finalizer na mão, e o namespace
+		// que não é nosso nunca vai sumir por nossa conta. O preço é um
+		// namespace que pode ficar órfão se alguém tiver arrancado os rótulos
+		// dele — por isso o evento nomeia o namespace, que é o que permite
+		// achá-lo depois.
+		r.event(pe, corev1.EventTypeWarning, "NamespaceDeOutroDono",
+			fmt.Sprintf("namespace %s existe e não pertence a este ambiente; não será apagado", ns.Name))
 		return true, nil
 	}
 
@@ -376,12 +559,18 @@ func (r *PreviewEnvironmentReconciler) teardown(ctx context.Context, pe *preview
 	return false, nil
 }
 
-// publishStatus grava o status observado. observedGeneration é escrito aqui e
-// em nenhum outro lugar: é o carimbo de qual spec este status responde.
-func (r *PreviewEnvironmentReconciler) publishStatus(ctx context.Context, pe *previewv1alpha1.PreviewEnvironment) error {
+// publishStatus grava o status observado.
+//
+// observedGeneration só avança quando `convergiu` — é o carimbo de que ESTE
+// spec foi atendido, não de que houve uma tentativa. Carimbá-lo no caminho de
+// erro fazia o campo afirmar convergência que não houve, e é exatamente esse
+// campo que um consumidor lê para decidir se pode confiar no resto do status.
+func (r *PreviewEnvironmentReconciler) publishStatus(ctx context.Context, pe *previewv1alpha1.PreviewEnvironment, convergiu bool) error {
 	expiry := metav1.NewTime(pe.ExpiryTime())
 	pe.Status.ExpiresAt = &expiry
-	pe.Status.ObservedGeneration = pe.Generation
+	if convergiu {
+		pe.Status.ObservedGeneration = pe.Generation
+	}
 	if err := r.Status().Update(ctx, pe); err != nil {
 		return fmt.Errorf("gravar status: %w", err)
 	}
@@ -444,9 +633,22 @@ func (r *PreviewEnvironmentReconciler) refreshActiveGauge(ctx context.Context) {
 		return
 	}
 
+	// Conta só o que está de fato no ar. O CR sobrevive ao vencimento de
+	// propósito — vira o registro de que aquele PR teve ambiente — e contar
+	// esses registros faria o gauge de "ativos" nunca descer: num cluster com
+	// duzentos PRs velhos, o painel mostraria duzentos ambientes ativos e
+	// nenhum namespace de preview existindo.
 	porRepositorio := map[string]int{}
 	for i := range list.Items {
-		porRepositorio[list.Items[i].Spec.Repository]++
+		item := &list.Items[i]
+		if !item.DeletionTimestamp.IsZero() {
+			continue
+		}
+		switch item.Status.Phase {
+		case previewv1alpha1.PhaseExpired, previewv1alpha1.PhaseTerminating, previewv1alpha1.PhaseFailed:
+			continue
+		}
+		porRepositorio[item.Spec.Repository]++
 	}
 	publicarAtivos(porRepositorio)
 }
