@@ -9,13 +9,18 @@ import (
 )
 
 // Rótulos que o operator carimba em tudo que cria. São o contrato de busca:
-// `kubectl get all -A -l preview.rigo.dev/owner=<ns>/<nome>` acha o ambiente inteiro.
+// `kubectl get all -A -l preview.rigo.dev/owner-name=<nome>` acha o ambiente
+// inteiro. Namespace e nome do dono vão em rótulos separados porque o
+// controller precisa fazer o caminho de volta — de um Deployment que mudou
+// para o PreviewEnvironment que o gerou — e "ns/nome" num rótulo só não
+// sobrevive à barra nem ao corte de 63 caracteres.
 const (
-	LabelOwner       = "preview.rigo.dev/owner"
-	LabelRepository  = "preview.rigo.dev/repository"
-	LabelPullRequest = "preview.rigo.dev/pull-request"
-	LabelCommit      = "preview.rigo.dev/commit"
-	LabelManagedBy   = "app.kubernetes.io/managed-by"
+	LabelOwnerNamespace = "preview.rigo.dev/owner-namespace"
+	LabelOwnerName      = "preview.rigo.dev/owner-name"
+	LabelRepository     = "preview.rigo.dev/repository"
+	LabelPullRequest    = "preview.rigo.dev/pull-request"
+	LabelCommit         = "preview.rigo.dev/commit"
+	LabelManagedBy      = "app.kubernetes.io/managed-by"
 
 	// ManagedByValue identifica quem escreveu o objeto.
 	ManagedByValue = "preview-operator"
@@ -110,10 +115,11 @@ func (pe *PreviewEnvironment) ExpiryTime() time.Time {
 // CommonLabels são os rótulos comuns a todo objeto criado para este ambiente.
 func (pe *PreviewEnvironment) CommonLabels() map[string]string {
 	l := map[string]string{
-		LabelManagedBy:   ManagedByValue,
-		LabelOwner:       fit(pe.Namespace+"-"+pe.Name, maxLabelLen),
-		LabelRepository:  fit(pe.RepositorySlug(), maxLabelLen),
-		LabelPullRequest: fmt.Sprintf("%d", pe.Spec.PullRequest),
+		LabelManagedBy:      ManagedByValue,
+		LabelOwnerNamespace: pe.Namespace,
+		LabelOwnerName:      pe.Name,
+		LabelRepository:     fit(pe.RepositorySlug(), maxLabelLen),
+		LabelPullRequest:    fmt.Sprintf("%d", pe.Spec.PullRequest),
 	}
 	if pe.Spec.Commit != "" {
 		l[LabelCommit] = fit(slug(pe.Spec.Commit), maxLabelLen)
