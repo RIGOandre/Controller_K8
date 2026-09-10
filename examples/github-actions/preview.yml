@@ -1,0 +1,121 @@
+# Workflow do repositório da aplicação — não deste repositório.
+#
+# Ele constrói a imagem do PR e escreve um PreviewEnvironment no cluster. Não
+# cria namespace, deployment nem ingress: quem faz isso é o operator. O CI só
+# declara o que quer, e o cluster converge.
+name: preview
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+
+concurrency:
+  # Um preview por PR. Push em sequência cancela o build anterior em vez de
+  # deixar duas imagens correndo para o mesmo ambiente.
+  group: preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  IMAGEM: ghcr.io/${{ github.repository }}
+  NAMESPACE_DOS_CRS: previews
+
+jobs:
+  subir:
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ env.IMAGEM }}:${{ github.event.pull_request.head.sha }}
+
+      - name: configura o kubectl
+        run: |
+          install -d -m700 "$HOME/.kube"
+          echo "${{ secrets.KUBECONFIG }}" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+
+      - name: declara o ambiente
+        run: |
+          cat <<MANIFESTO | kubectl apply -f -
+          apiVersion: preview.rigo.dev/v1alpha1
+          kind: PreviewEnvironment
+          metadata:
+            name: pr-${{ github.event.pull_request.number }}
+            namespace: ${{ env.NAMESPACE_DOS_CRS }}
+          spec:
+            repository: ${{ github.repository }}
+            pullRequest: ${{ github.event.pull_request.number }}
+            commit: ${{ github.event.pull_request.head.sha }}
+            image: ${{ env.IMAGEM }}:${{ github.event.pull_request.head.sha }}
+            port: 3000
+            ttl: 24h
+            env:
+              - name: NODE_ENV
+                value: preview
+          MANIFESTO
+
+      - name: espera ficar pronto
+        id: espera
+        run: |
+          kubectl wait previewenvironment/pr-${{ github.event.pull_request.number }} \
+            -n "$NAMESPACE_DOS_CRS" \
+            --for=condition=Ready --timeout=5m
+          url=$(kubectl get previewenvironment/pr-${{ github.event.pull_request.number }} \
+                  -n "$NAMESPACE_DOS_CRS" -o jsonpath='{.status.url}')
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
+      # Diagnóstico no próprio job: quem revisa o PR não costuma ter kubectl.
+      - name: o que aconteceu, se deu errado
+        if: failure()
+        run: |
+          kubectl describe previewenvironment/pr-${{ github.event.pull_request.number }} \
+            -n "$NAMESPACE_DOS_CRS" || true
+          kubectl get pods -n "preview-$(echo '${{ github.repository }}' | tr 'A-Z/' 'a-z-')-${{ github.event.pull_request.number }}" || true
+
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const url = '${{ steps.espera.outputs.url }}'
+            const marca = '<!-- preview-operator -->'
+            const corpo = `${marca}\nAmbiente do PR no ar: ${url}\n\nVence em 24h. Cai sozinho no merge.`
+            const { data: comentarios } = await github.rest.issues.listComments({
+              ...context.repo, issue_number: context.issue.number,
+            })
+            const meu = comentarios.find(c => c.body.startsWith(marca))
+            // Edita o comentário que já existe em vez de empilhar um por push.
+            if (meu) {
+              await github.rest.issues.updateComment({ ...context.repo, comment_id: meu.id, body: corpo })
+            } else {
+              await github.rest.issues.createComment({ ...context.repo, issue_number: context.issue.number, body: corpo })
+            }
+
+  derrubar:
+    if: github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - name: configura o kubectl
+        run: |
+          install -d -m700 "$HOME/.kube"
+          echo "${{ secrets.KUBECONFIG }}" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+
+      # Apagar o CR basta: o finalizer do operator leva o namespace junto, e o
+      # namespace leva deployment, service e ingress.
+      - name: apaga o ambiente
+        run: |
+          kubectl delete previewenvironment/pr-${{ github.event.pull_request.number }} \
+            -n "$NAMESPACE_DOS_CRS" --ignore-not-found --wait=false
