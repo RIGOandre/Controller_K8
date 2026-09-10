@@ -1,0 +1,62 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: preview-operator
+  namespace: preview-system
+  labels:
+    app.kubernetes.io/name: preview-operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: preview-operator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: preview-operator
+    spec:
+      serviceAccountName: preview-operator
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: manager
+          image: ghcr.io/rigoandre/preview-operator:v0.1.0
+          args:
+            - --leader-elect
+            - --base-domain=preview.exemplo.dev
+            - --ingress-class=nginx
+            - --quota-cpu=2
+            - --quota-memory=2Gi
+            - --quota-pods=10
+          ports:
+            - name: metrics
+              containerPort: 8080
+            - name: probes
+              containerPort: 8081
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: probes
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: probes
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 96Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      terminationGracePeriodSeconds: 10

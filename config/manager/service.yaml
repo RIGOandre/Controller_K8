@@ -1,0 +1,16 @@
+# Service só das métricas. O ServiceMonitor do kube-prometheus-stack aponta
+# para cá; sem ele o Prometheus não descobre o operator.
+apiVersion: v1
+kind: Service
+metadata:
+  name: preview-operator-metrics
+  namespace: preview-system
+  labels:
+    app.kubernetes.io/name: preview-operator
+spec:
+  selector:
+    app.kubernetes.io/name: preview-operator
+  ports:
+    - name: metrics
+      port: 8080
+      targetPort: metrics

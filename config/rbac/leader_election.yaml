@@ -1,0 +1,33 @@
+# Eleição de líder. Fica num Role de namespace e não no ClusterRole porque a
+# lease vive só no namespace do manager — não há motivo para dar acesso a
+# lease do cluster inteiro a quem só precisa coordenar as próprias réplicas.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: preview-operator-leader-election
+  namespace: preview-system
+  labels:
+    app.kubernetes.io/name: preview-operator
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: preview-operator-leader-election
+  namespace: preview-system
+  labels:
+    app.kubernetes.io/name: preview-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: preview-operator-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: preview-operator
+    namespace: preview-system

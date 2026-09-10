@@ -1,0 +1,17 @@
+apiVersion: preview.rigo.dev/v1alpha1
+kind: PreviewEnvironment
+metadata:
+  name: loja-pr-42
+  namespace: previews
+spec:
+  repository: acme/loja
+  pullRequest: 42
+  commit: 9f1c2ab
+  image: ghcr.io/acme/loja:9f1c2ab
+  port: 3000
+  ttl: 8h
+  env:
+    - name: NODE_ENV
+      value: preview
+    - name: DATABASE_URL
+      value: postgres://loja:loja@postgres.previews.svc:5432/loja_preview
