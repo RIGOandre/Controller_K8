@@ -252,8 +252,9 @@ verdade, porque o `fake client` não faz a contabilidade de `metadata.generation
 
 ## Estado
 
-`v1alpha1`, rodando em cluster próprio. O que falta, na ordem em que pretendo
-resolver:
+`v1alpha1`. Os testes rodam contra um kube-apiserver de verdade, mas o operator
+ainda não foi instalado num cluster: o primeiro `make deploy` é o primeiro teste
+real. O que falta, na ordem em que pretendo resolver:
 
 - `NetworkPolicy` de egress padrão-nega no namespace do preview. Hoje o pod
   alcança a rede interna do cluster, o que é insuficiente para PR de fork.
