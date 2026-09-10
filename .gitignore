@@ -1,0 +1,9 @@
+bin/
+dist/
+cover.out
+cover.html
+*.test
+
+# kubeconfig de cluster de teste: costuma vir com token dentro
+kubeconfig
+*.kubeconfig
