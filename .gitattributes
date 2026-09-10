@@ -1,0 +1,14 @@
+# Fim de linha normalizado para LF no repositório. Um checkout no Windows com
+# autocrlf ligado grava CRLF no Dockerfile e nos scripts, e o shebang vira
+# "#!/usr/bin/env bash\r" — o kernel responde "bad interpreter" e o erro não
+# diz nada sobre a causa.
+* text=auto eol=lf
+*.sh text eol=lf
+
+# Gerados pelo controller-gen a partir das marcações kubebuilder no código.
+# Editar qualquer um destes à mão é erro: o próximo `make generate` desfaz, e o
+# CI reprova em "gerado está em dia". Marcados aqui para saírem da conta de
+# linguagem e virem colapsados no diff do pull request.
+api/v1alpha1/zz_generated.deepcopy.go linguist-generated=true
+config/crd/bases/*.yaml linguist-generated=true
+config/rbac/role.yaml linguist-generated=true
