@@ -34,6 +34,12 @@ jobs:
       - name: gerado está em dia
         run: make verify-generate
 
+      # O envtest sobe um kube-apiserver e um etcd de verdade. É o que pega o
+      # que o client falso não alcança: schema do CRD, defaults e validação.
+      - name: binários do envtest
+        run: |
+          echo "KUBEBUILDER_ASSETS=$(go run sigs.k8s.io/controller-runtime/tools/setup-envtest@release-0.19 use 1.31.0 -p path)" >> "$GITHUB_ENV"
+
       - run: go test ./... -race -coverprofile=cover.out -covermode=atomic
       - name: cobertura
         run: go tool cover -func=cover.out | tail -1

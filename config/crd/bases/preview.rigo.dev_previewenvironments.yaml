@@ -299,8 +299,13 @@ spec:
                 type: object
               ttl:
                 default: 24h
-                description: TTL conta a partir da criação do objeto. Vencido, o ambiente
-                  é derrubado.
+                description: |-
+                  TTL conta a partir da criação do objeto. Vencido, o ambiente é derrubado.
+
+                  É ponteiro por causa do default. metav1.Duration é struct, e `omitempty`
+                  não omite struct: o campo ia no corpo da requisição como "0s" mesmo sem
+                  ninguém ter pedido, o apiserver via valor presente e o default do CRD
+                  nunca era aplicado.
                 type: string
             required:
             - image

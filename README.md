@@ -130,14 +130,25 @@ resto continua funcionando.
 
 ```
 $ go test ./... -race -cover
-ok  github.com/RIGOandre/preview-operator/api/v1alpha1        coverage: 35.0%
-ok  github.com/RIGOandre/preview-operator/internal/controller  coverage: 82.4%
+ok  github.com/RIGOandre/Controller_K8/api/v1alpha1        coverage: 34.0%
+ok  github.com/RIGOandre/Controller_K8/internal/controller  coverage: 86.6%
 ```
 
-24 casos, sem etcd e sem apiserver: o `fake client` do controller-runtime
-basta para o que está sob teste, que é a decisão do reconcile. Os 35% do
-pacote da API são cobertura diluída pelo `zz_generated.deepcopy.go`, que é
-gerado e não tem decisão dentro.
+31 casos, em duas camadas. Os 34% do pacote da API são cobertura diluída pelo
+`zz_generated.deepcopy.go`, que é gerado e não tem decisão dentro.
+
+**Com `fake client`**, sem etcd e sem apiserver, para a decisão do reconcile —
+que é onde mora a lógica. Rodam em 50ms.
+
+**Com `envtest`**, contra um kube-apiserver e um etcd de verdade, para o que o
+client falso não alcança: o schema do CRD, os defaults que vêm dele, a
+validação que o apiserver aplica e o status como subresource real.
+
+A segunda camada se pagou no primeiro dia. `spec.ttl` era `metav1.Duration`,
+que é struct — e `omitempty` não omite struct. O campo ia na requisição como
+`"0s"` mesmo sem ninguém ter pedido, o apiserver via valor presente e o
+default de 24h do CRD nunca era aplicado. Nenhum teste com client falso
+pegaria isso: lá o default do CRD não existe. Hoje `ttl` é ponteiro.
 
 O que os testes seguram, em ordem de importância:
 
@@ -149,10 +160,12 @@ O que os testes seguram, em ordem de importância:
 | Finalizer segura o CR até o namespace sumir | Namespace zumbi sem dono |
 | Namespace de terceiro não é apagado | Um preview virar incidente |
 | Requeue no instante do vencimento | Ambiente vivo além do TTL, ou varredura cara |
+| O apiserver recusa spec inválido | Marcação de validação virar comentário decorativo |
+| Os defaults do CRD chegam ao objeto | Ambiente sem TTL, vivo para sempre |
 
-Dois deles nasceram falhando e apontaram erro meu: status de Deployment é
-subresource até no client falso, e a derrubada leva uma passada a mais porque
-o namespace fica em `Terminating`.
+Três deles nasceram falhando e apontaram erro meu: status de Deployment é
+subresource até no client falso, a derrubada leva uma passada a mais porque o
+namespace fica em `Terminating`, e o `ttl` que nunca recebia default.
 
 O CI ainda valida que o CRD e o RBAC gerados das marcações estão em dia com o
 código, e passa `kubeconform` em todo manifest — inclusive no sample do

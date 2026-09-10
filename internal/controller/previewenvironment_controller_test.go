@@ -52,7 +52,7 @@ func novoAmbiente(mods ...func(*previewv1alpha1.PreviewEnvironment)) *previewv1a
 			Commit:      "abc1234",
 			Image:       "ghcr.io/acme/loja:abc1234",
 			Port:        3000,
-			TTL:         metav1.Duration{Duration: time.Hour},
+			TTL:         &metav1.Duration{Duration: time.Hour},
 		},
 	}
 	for _, m := range mods {

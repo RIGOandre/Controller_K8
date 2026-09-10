@@ -82,9 +82,14 @@ type PreviewEnvironmentSpec struct {
 	Host string `json:"host,omitempty"`
 
 	// TTL conta a partir da criação do objeto. Vencido, o ambiente é derrubado.
+	//
+	// É ponteiro por causa do default. metav1.Duration é struct, e `omitempty`
+	// não omite struct: o campo ia no corpo da requisição como "0s" mesmo sem
+	// ninguém ter pedido, o apiserver via valor presente e o default do CRD
+	// nunca era aplicado.
 	// +kubebuilder:default="24h"
 	// +optional
-	TTL metav1.Duration `json:"ttl,omitempty"`
+	TTL *metav1.Duration `json:"ttl,omitempty"`
 
 	// Resources do container. Sem valor, herda o default do manager.
 	// +optional

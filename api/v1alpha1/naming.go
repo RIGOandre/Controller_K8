@@ -99,7 +99,7 @@ func (pe *PreviewEnvironment) HostFor(baseDomain string) string {
 
 // TTLDuration é o TTL efetivo, com piso no default.
 func (pe *PreviewEnvironment) TTLDuration() time.Duration {
-	if pe.Spec.TTL.Duration <= 0 {
+	if pe.Spec.TTL == nil || pe.Spec.TTL.Duration <= 0 {
 		return DefaultTTL
 	}
 	return pe.Spec.TTL.Duration

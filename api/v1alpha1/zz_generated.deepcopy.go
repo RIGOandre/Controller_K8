@@ -89,7 +89,11 @@ func (in *PreviewEnvironmentSpec) DeepCopyInto(out *PreviewEnvironmentSpec) {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
-	out.TTL = in.TTL
+	if in.TTL != nil {
+		in, out := &in.TTL, &out.TTL
+		*out = new(metav1.Duration)
+		**out = **in
+	}
 	in.Resources.DeepCopyInto(&out.Resources)
 }
 

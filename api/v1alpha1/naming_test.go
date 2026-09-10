@@ -87,7 +87,7 @@ func TestTTLCaiNoDefaultQuandoNaoInformado(t *testing.T) {
 	if got := pe.TTLDuration(); got != DefaultTTL {
 		t.Fatalf("queria %s, veio %s", DefaultTTL, got)
 	}
-	pe.Spec.TTL = metav1.Duration{Duration: -time.Hour}
+	pe.Spec.TTL = &metav1.Duration{Duration: -time.Hour}
 	if got := pe.TTLDuration(); got != DefaultTTL {
 		t.Fatalf("TTL negativo devia cair no default, veio %s", got)
 	}
@@ -100,7 +100,7 @@ func TestExpiryContaDaCriacao(t *testing.T) {
 	criado := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
 	pe := env("acme/loja", 1)
 	pe.CreationTimestamp = metav1.NewTime(criado)
-	pe.Spec.TTL = metav1.Duration{Duration: 3 * time.Hour}
+	pe.Spec.TTL = &metav1.Duration{Duration: 3 * time.Hour}
 
 	if got := pe.ExpiryTime(); !got.Equal(criado.Add(3 * time.Hour)) {
 		t.Fatalf("queria %s, veio %s", criado.Add(3*time.Hour), got)
