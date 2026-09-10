@@ -7,3 +7,5 @@ cover.html
 # kubeconfig de cluster de teste: costuma vir com token dentro
 kubeconfig
 *.kubeconfig
+
+.schemas/

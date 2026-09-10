@@ -1,0 +1,95 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - name: gofmt
+        run: |
+          fora=$(gofmt -l .)
+          if [ -n "$fora" ]; then
+            echo "fora do gofmt:"; echo "$fora"; exit 1
+          fi
+
+      - run: go vet ./...
+
+      # O CRD e o RBAC saem das marcações no código Go. Se alguém mexe no tipo
+      # e não regera, o cluster recebe um schema que não corresponde ao que o
+      # controller lê — e o erro só aparece em runtime.
+      - name: gerado está em dia
+        run: make verify-generate
+
+      - run: go test ./... -race -coverprofile=cover.out -covermode=atomic
+      - name: cobertura
+        run: go tool cover -func=cover.out | tail -1
+
+  manifests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pyyaml
+
+      - name: instala o kubeconform
+        run: |
+          curl -sSLo kubeconform.tar.gz \
+            https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
+          tar xzf kubeconform.tar.gz kubeconform
+          sudo install -m755 kubeconform /usr/local/bin/
+
+      - name: schema do CRD para o validador
+        run: python3 hack/crd-schemas.py
+
+      # CustomResourceDefinition fica de fora porque o store público não tem o
+      # schema dela; quem garante o CRD é o make verify-generate.
+      - name: valida os manifests
+        run: |
+          kubeconform -strict -summary \
+            -skip CustomResourceDefinition \
+            -schema-location default \
+            -schema-location '.schemas/{{ .ResourceKind }}_{{ .ResourceAPIVersion }}.json' \
+            config/
+
+  image:
+    runs-on: ubuntu-latest
+    needs: [go, manifests]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: login no ghcr
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: ${{ startsWith(github.ref, 'refs/tags/v') }}
+          tags: ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+          build-args: VERSION=${{ github.ref_name }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
